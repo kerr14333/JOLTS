@@ -1,124 +1,112 @@
 
-#https://www.bls.gov/jlt/jlt_statedata.htm
-#https://www.bls.gov/jlt/jlt_statedata_methodology.htm
-#https://www.bls.gov/news.release/pdf/jolts.pdf
 
-
+# Definition of variables in Excel file
+#
 # Job Openings           - JO
 # Quits                  - Q
 # Hires                  - H
 # Layoffs and Discharges - LD
 # Total Separations      - TS turnover
 
-#https://towardsdatascience.com/animating-your-data-visualizations-like-a-boss-using-r-f94ae20843e3
 
+# Resources
+#
+#https://www.bls.gov/jlt/jlt_statedata.htm
+#https://www.bls.gov/jlt/jlt_statedata_methodology.htm
+#https://www.bls.gov/news.release/pdf/jolts.pdf
 #https://www.bls.gov/opub/hom/pdf/jlt-20130314.pdf
 
-#The job openings rate is computed by
-#dividing the number of job openings by the sum 
-#of the number of people employed and the number of job openings and
-#multiplying the resulting quotient by 100
 
-#The hires rate is computed by dividing the number of people hired by
-#the number of people employed and multiplying the resulting
-#quotient by 100.
-
-#The quits, layoffs and discharges, and "other separations" rates are
-#computed similarly, by dividing the number of workers who,
-#respectively, quit their jobs, were laid off or discharged, and
-#were otherwise separated, by the number of people employed
-#and multiplying the resulting quotient by 100.
-
-
+#Libraries
 library(tidyverse)
-library(readr)
-library(magrittr)
+library(readxl)
+library(seasonal)
+library(furrr)
+library(timetk)
+library(scales)
+library(plotly)
+library(lubridate)
 
 
-my.file <- "E:/JOLTS/jlt_statedata_2018.xlsx"
+###############################################
+# Read in Experimental JOLTS State Data
+#
 
-
+#location of file
+my.file <- "E:/JOLTS/jlt_statedata_2018.xlsx" 
 jolts_state <- readxl::read_xlsx( path = my.file,
-                   sheet = "Table A",
-                    skip = 2)
+                                  sheet = "Table A",
+                                  skip = 2)
+
+#Set all names to lowercase so its less of a pain
+#to work with
+names( jolts_state ) <- tolower( names( jolts_state ) )
 
 
-names(jolts_state) <- tolower(names(jolts_state))
-
-temp <- jolts_state %>% 
+########################################
+# Add a date Variable 
+# for easier processing later
+jolts_state <- jolts_state %>% 
         mutate( date = as.Date( paste0( substr(period,1,4), "-", substr(period,5,6), "-01" ), 
-                                format="%Y-%m-%d" ),
-                year = as.numeric(substr(period,1,4)) )
+                                format = "%Y-%m-%d" ))
 
 
-st_avg <- temp %>% group_by(st,year) %>% summarise( jo = mean( jo ), 
-                                                    q = mean(q), 
-                                                    ld = mean(ld), 
-                                                    jor = mean( jor ), 
-                                                    qr = mean(qr), 
-                                                    ldr = mean(ldr) )
+######################################################
+#
+# Some of the states are highly seasonal and it makes 
+# it difficult to see true economic shifts
+#
+# I seasonally adjust it with X-13-ARIMA-SEATS using the
+# seasonal package and use the furrr package to paralellize
+# the code to make it run faster
 
-st_avg %>% filter( year %in% c("2010","2018") ) %>% 
-  ggplot( aes( x=jo, y=q, color=as.factor(year) ) ) + geom_point()
-
-
-st_avg %>% ggplot( aes( x = year, y = q, col = st) ) + geom_line()
-
-
-temp %>% filter( st == "NM" ) %>%  ggplot(aes(x=date,y=jo)) + geom_line() 
-
-
-
-
-st_avg
+plan(multiprocess) #set up multiprocessor job
+jolts_state_adj <- jolts_state %>% 
+                   nest( -st ) %>% #Nest the dataset, convert series to ts objects, seasonally all series,
+                                 #future_map is the workhorse for parallel, tk_tbl converts ts back to tibble
+                   mutate( jor_seas = future_map(data, ~tk_tbl(final( seas  (ts ( .x$jor, frequency=12, start=c(2001,2)),transform.function = "log")))),
+                           qr_seas =  future_map(data, ~tk_tbl(final( seas  (ts ( .x$qr,  frequency=12, start=c(2001,2)),transform.function = "log")))),
+                           ldr_seas = future_map(data, ~tk_tbl(final( seas  (ts ( .x$ldr, frequency=12, start=c(2001,2)),transform.function = "log")))))
 
 
-p <- temp %>% ggplot(aes(x = jor, y=ldr)) +
-  geom_point(show.legend = FALSE, alpha = 0.7) +
-  geom_text( aes(label=st),hjust=0, vjust=0) +
-  scale_color_viridis_d() +
-  scale_size(range = c(2, 12)) +
-  #scale_x_log10() +
-  #scale_y_log10() + 
-  labs(x ="Job Openings", y = "Layoffs and Discharges")
-
-
-p + transition_states(date, 
-                      transition_length = 2,
-                      state_length =1 )  + ease_aes('cubic-in-out') 
-
-final <- p + transition_time(as.numeric(year)) +
-  
-
-anim_save( "lay_offs_v_job_openings.gif")
-
-
-#############################################################################
-#############################################################################
-
-# Create example data
-df <- data.frame(ordering = c(rep(1:3, 2), 3:1, rep(1:3, 2)),
-                 year = factor(sort(rep(2001:2005, 3))),
-                 value = round(runif(15, 0, 100)),
-                 group = rep(letters[1:3], 5))
-
-library("gganimate")
-library("ggplot2")
-
-# Create animated ggplot with coord_flip
-ggp <- ggplot(df, aes(x = ordering, y = value)) +
-  geom_bar(stat = "identity", aes(fill = group)) +
-  transition_states(year, transition_length = 2, state_length = 0) +
-  view_follow(fixed_x = TRUE) +
-  coord_flip() +
-  theme(axis.title.x = element_blank(),
-        axis.ticks.x = element_blank(),
-        axis.text.x  = element_blank(),
-        axis.title.y = element_blank(),
-        axis.ticks.y = element_blank(),
-        axis.text.y  = element_blank(),
-        plot.margin = unit(c(1, 1, 8, 1), "cm"))
+#unnest dataset, get rid of TS object indexes, rename the series back to their respective names (suffixed with s for seasonally adjusted)
+jolts_state_adj <- jolts_state_adj %>%
+                   unnest( ) %>% 
+                   select( -index, -index1, -index2 ) %>%
+                   rename( jors = value, qrs = value1, ldrs = value2 )
 
 
 
-ggp
+####
+# Create ggplot of 
+#
+
+gg <- ggplot(jolts_state_adj, aes( x = jors,
+                                   y = ldrs,
+                                   text = paste('Date: ',paste0(year(date),"-",month(date)), #Create hover tool-tips
+                                               '<br>State:', st, 
+                                               '<br>Job Opening Rate:', sprintf("%1.3f%%", 100*jors),
+                                               '<br>Layoff/Discharge Rate:',sprintf("%1.3f%%", 100*ldrs)))) +
+  geom_text(aes(frame = paste0(year(date),"-",sprintf("%02d",month(date))), #Draw the points as state abbreviations
+                label=st, 
+                ids = st   ),size=2.5) +
+  scale_y_continuous(labels=percent) + #make x and y percentages
+  scale_x_continuous(labels=percent) +
+  xlab("Job Openings Rate") + 
+  ylab("Layoff/Discharges Rate") +
+  ggtitle("Seasonally Adjusted Job Opening Rates <br> vs Layoff/Discharge Rates") + 
+  geom_abline(slope=1,intercept=0) +  #y=x line, if points are above this, state is laying off more than opening
+  theme(plot.title = element_text(hjust = 0.5)) #center title
+
+
+#####
+# Create plotly object and render it
+#
+ggplotly(gg,tooltip = "text") %>% 
+  config(displayModeBar = F) %>%   #remove plotly menu bar
+  layout(margin=list(t=100)) %>%   #make top margin large to fit title
+  animation_slider(                #create prefix for animation (year, month)
+    currentvalue = list(prefix = "YEAR/MONTH: ", font = list(color="blue"))
+  )
+
+
