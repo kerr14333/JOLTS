@@ -1,0 +1,217 @@
+---
+title: "BLS Data Quest - JOLTS State Data"
+author: "Chris Grieves"
+date: "7/16/2019"
+output: html_document
+---
+<style type="text/css">
+
+body{ /* Normal  */
+      font-size: 20px;
+  }
+</style>
+
+<h1>Introduction</h1>
+
+In this BLS Data Quest, we explore the new Job Openings and Labor Turnover Survey (JOLTS)  experimental state estimates found [here](https://www.bls.gov/jlt/jlt_statedata.htm). I chose to tackle this problem by building an animated scatterplot of the Job Openings Rate vs the Layoff and Discharge Rate. You can see how the these numbers relate to each other over time. Hit <strong>Play</strong> to begin the animation. You can also use the slider to move to specific dates.
+
+The <strong>black</strong> line in the plot below is the line y=x, that is where job openings equals the number of layoffs/discharges. Points above this line are laying off more than they are growing. A good example of this is if you move the slider to the year 2009 to watch the Great Recession play out.
+
+
+```{r echo=FALSE, error=F, message=FALSE, warning=FALSE,cache=T}
+
+
+# Definition of variables in Excel file
+#
+# Job Openings           - JO
+# Quits                  - Q
+# Hires                  - H
+# Layoffs and Discharges - LD
+# Total Separations      - TS turnover
+
+
+# Resources
+#
+#https://www.bls.gov/jlt/jlt_statedata.htm
+#https://www.bls.gov/jlt/jlt_statedata_methodology.htm
+#https://www.bls.gov/news.release/pdf/jolts.pdf
+#https://www.bls.gov/opub/hom/pdf/jlt-20130314.pdf
+
+
+#Libraries
+library(tidyverse)
+library(readxl)
+library(seasonal)
+library(furrr)
+library(timetk)
+library(scales)
+library(plotly)
+library(lubridate)
+
+
+###############################################
+# Read in Experimental JOLTS State Data
+#
+
+#location of file
+my.file <- "X:/JOLTS/jlt_statedata_2018.xlsx" 
+jolts_state <- readxl::read_xlsx( path = my.file,
+                                  sheet = "Table A",
+                                  skip = 2)
+
+#Set all names to lowercase so its less of a pain
+#to work with
+names( jolts_state ) <- tolower( names( jolts_state ) )
+
+
+########################################
+# Add a date Variable 
+# for easier processing later
+jolts_state <- jolts_state %>% 
+        mutate( date = as.Date( paste0( substr(period,1,4), "-", substr(period,5,6), "-01" ), 
+                                format = "%Y-%m-%d" ))
+
+
+######################################################
+#
+# Some of the states are highly seasonal and it makes 
+# it difficult to see true economic shifts
+#
+# I seasonally adjust it with X-13-ARIMA-SEATS using the
+# seasonal package and use the furrr package to paralellize
+# the code to make it run faster
+
+plan(multiprocess) #set up multiprocessor job
+jolts_state_adj <- jolts_state %>% 
+                   nest( -st ) %>% #Nest the dataset, convert series to ts objects, seasonally all series,
+                                 #future_map is the workhorse for parallel, tk_tbl converts ts back to tibble
+                   mutate( jor_seas = future_map(data, ~tk_tbl(final( seas  (ts ( .x$jor, frequency=12, start=c(2001,2)),transform.function = "log")))),
+                           qr_seas =  future_map(data, ~tk_tbl(final( seas  (ts ( .x$qr,  frequency=12, start=c(2001,2)),transform.function = "log")))),
+                           ldr_seas = future_map(data, ~tk_tbl(final( seas  (ts ( .x$ldr, frequency=12, start=c(2001,2)),transform.function = "log")))))
+
+
+#unnest dataset, get rid of TS object indexes, rename the series back to their respective names (suffixed with s for seasonally adjusted)
+jolts_state_adj <- jolts_state_adj %>%
+                   unnest( ) %>% 
+                   select( -index, -index1, -index2 ) %>%
+                   rename( jors = value, qrs = value1, ldrs = value2 )
+
+
+```
+
+<div align="center">
+
+
+```{r echo=FALSE, error=F, message=FALSE, warning=FALSE,cache=T, fig.align="center"}
+####
+# Create ggplot of 
+#
+
+gg <- ggplot(jolts_state, aes( x = jor,
+                                   y = ldr,
+                                   text = paste('Date: ',paste0(year(date),"-",month(date)), #Create hover tool-tips
+                                               '<br>State:', st, 
+                                               '<br>Job Opening Rate:', sprintf("%1.3f%%", 100*jor),
+                                               '<br>Layoff/Discharge Rate:',sprintf("%1.3f%%", 100*ldr)))) +
+  geom_text(aes(frame = paste0(year(date),"-",sprintf("%02d",month(date))), #Draw the points as state abbreviations
+                label=st, 
+                ids = st   ),size=2.5) +
+  scale_y_continuous(labels=percent) + #make x and y percentages
+  scale_x_continuous(labels=percent) +
+  xlab("Job Openings Rate") + 
+  ylab("Layoff/Discharges Rate") +
+  ggtitle("Not Seasonally Adjusted Job Opening Rates <br> vs Layoff/Discharge Rates") + 
+  geom_abline(slope=1,intercept=0) +  #y=x line, if points are above this, state is laying off more than opening
+  theme(plot.title = element_text(hjust = 0.5)) #center title
+
+
+#####
+# Create plotly object and render it
+#
+ggplotly(gg,tooltip = "text") %>% 
+  config(displayModeBar = F) %>%   #remove plotly menu bar
+  layout(margin=list(t=100)) %>%   #make top margin large to fit title
+  animation_slider(                #create prefix for animation (year, month)
+    currentvalue = list(prefix = "YEAR/MONTH: ", font = list(color="blue"))
+  )
+
+
+
+```
+
+</div>
+
+<br>
+
+Another observation to make is that the outlier Alaska (AK) dashes wildly back and forth across the scatterplot. Why is this? The series happens to be very seasonal as you can see in the time-series plots below.
+
+<br>
+
+
+````{r echo=FALSE, error=F, message=FALSE, warning=FALSE,cache=T, fig.align="center"}
+
+## Alaska Time Series to show seasonality
+
+#use grid and grid extra to format output
+library(gridExtra)
+library(grid)
+
+#Layoff Discharge rate time series plot
+g1 <- jolts_state %>% filter(st=="AK") %>% ggplot(aes(x=date,y=ldr)) + geom_line() + xlab("Date") +ylab("Layoff/Discharge Rates") + scale_y_continuous(labels=percent,limits = c(.01,.075)) 
+
+#Job Openings rate time series plot
+g2 <- jolts_state %>% filter(st=="AK") %>% ggplot(aes(x=date,y=jor)) + geom_line() + xlab("Date")+ylab("Job Opening Rates") + scale_y_continuous(labels=percent,limits = c(.01,.075)) 
+
+#Use Grid Extra to show side by side images
+grid.arrange(g1,g2,ncol=2,top = textGrob("Time-Series of Alaska Layoff/Discharge Rates (Left) \nand Job Opening Rates (Right)"))
+```
+
+<br>
+
+You can find a few other states that exhibit this seasonality, including Montana (MT). To fix this, we use the Census Bureau's X-13-ARIMA-SEATS software to seasonally adjust the series via the R `seasonal` package. This way the seasonality will not obscure true economic movements that would be of interest to an analyst (A fair warning is that one should be more careful than I have seasonally adjusting, this is for the sake of quick analysis). Alaska remains an outlier which I hypthesize to be due to high turnover in employment. We recreate the animation below.
+
+<div align="center">
+```{r echo=FALSE, error=F, message=FALSE, warning=FALSE,cache=T, fig.align="center"}
+####
+# Create ggplot of seasonally adjusted layoffs vs job openings
+#
+
+gg <- ggplot(jolts_state_adj, aes( x = jors,
+                                   y = ldrs,
+                                   text = paste('Date: ',paste0(year(date),"-",month(date)), #Create hover tool-tips
+                                               '<br>State:', st, 
+                                               '<br>Job Opening Rate:', sprintf("%1.3f%%", 100*jors),
+                                               '<br>Layoff/Discharge Rate:',sprintf("%1.3f%%", 100*ldrs)))) +
+  geom_text(aes(frame = paste0(year(date),"-",sprintf("%02d",month(date))), #Draw the points as state abbreviations
+                label=st, 
+                ids = st   ),size=2.5) +
+  scale_y_continuous(labels=percent) + #make x and y percentages
+  scale_x_continuous(labels=percent) +
+  xlab("Job Openings Rate") + 
+  ylab("Layoff/Discharges Rate") +
+  ggtitle("Seasonally Adjusted Job Opening Rates <br> vs Layoff/Discharge Rates") + 
+  geom_abline(slope=1,intercept=0) +  #y=x line, if points are above this, state is laying off more than opening
+  theme(plot.title = element_text(hjust = 0.5)) #center title
+
+
+#####
+# Create plotly object and render it
+#
+ggplotly(gg,tooltip = "text") %>% 
+  config(displayModeBar = F) %>%   #remove plotly menu bar
+  layout(margin=list(t=100)) %>%   #make top margin large to fit title
+  animation_slider(                #create prefix for animation (year, month)
+    currentvalue = list(prefix = "YEAR/MONTH: ", font = list(color="blue"))
+  )
+
+
+
+```
+</div>
+
+<br>
+
+Explore the animations and see if you can ask some questions of your own.
+
+<br>
+<br>
